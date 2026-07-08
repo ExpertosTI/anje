@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.local
+.gemini.local
+api/.env
+api/.gemini.local
+*.log
+.DS_Store
+"LOGOTIPO ACTUALIZADO .pdf"
+api/dist/
+web/dist/

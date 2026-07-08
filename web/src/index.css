@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+@theme {
+  --color-anje-pink: #E197B1;
+  --color-anje-pink-dark: #C97898;
+  --color-anje-pink-light: #F8E8EE;
+  --font-serif: "Playfair Display", Georgia, serif;
+  --font-sans: "Inter", system-ui, sans-serif;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--font-sans);
+  @apply antialiased text-neutral-900 bg-white;
+}
+
+h1, h2, h3 { font-family: var(--font-serif); }
+
+.btn {
+  @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-semibold transition-all duration-300;
+}
+
+.btn-primary {
+  @apply text-white shadow-lg;
+  background: linear-gradient(135deg, #E197B1, #C97898);
+}
+.btn-primary:hover { @apply -translate-y-0.5 shadow-xl; }
+
+.btn-outline {
+  @apply border-2 border-anje-pink text-anje-pink-dark bg-transparent;
+}
+.btn-outline:hover { @apply bg-anje-pink-light -translate-y-0.5; }
+
+.btn-dark { @apply bg-black text-white; }
+.btn-dark:hover { @apply bg-neutral-800 -translate-y-0.5; }
+
+.btn-sm { @apply px-4 py-2 text-sm rounded-lg; }
+
+.input {
+  @apply w-full px-4 py-2.5 rounded-xl border border-neutral-200 bg-neutral-50 focus:outline-none focus:border-anje-pink focus:ring-2 focus:ring-anje-pink/20 transition-all;
+}
+
+.card {
+  @apply bg-white rounded-2xl border border-neutral-100 shadow-sm hover:shadow-lg transition-all duration-300;
+}

@@ -1,0 +1,13 @@
+{
+  "name": "anje-leaders",
+  "private": true,
+  "version": "0.2.0",
+  "scripts": {
+    "dev:api": "npm run start:dev --prefix api",
+    "dev:web": "npm run dev --prefix web",
+    "build": "npm run build --prefix api && npm run build --prefix web",
+    "seed:db": "bash scripts/seed-db.sh",
+    "seed": "bash scripts/seed.sh"
+  },
+  "engines": { "node": ">=22.12.0" }
+}
