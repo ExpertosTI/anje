@@ -1,12 +1,33 @@
 import { AnimatePresence, motion } from 'framer-motion';
-import { Bot, ChevronRight, Send, Sparkles, X } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { Bot, ChevronRight, RotateCcw, Send, Sparkles, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useOnboardingOptional } from '../context/OnboardingContext';
 import { api } from '../lib/api';
-import { detectRole, loadProgress } from '../lib/onboarding';
-import { useLocation } from 'react-router-dom';
+import { detectRole, loadProgress, type OnboardingRole } from '../lib/onboarding';
 
-type Msg = { role: 'user' | 'assistant'; content: string };
+type Msg = { role: 'user' | 'assistant'; content: string; ai?: boolean };
+
+const QUICK: Record<OnboardingRole, string[]> = {
+  cliente: ['¿Qué productos tienen?', '¿Cómo pido una demo?', '¿Es gratis la demostración?'],
+  vendedor: ['¿Cómo registro ventas?', '¿Qué es actividad semanal?', '¿Cómo agrego prospectos?'],
+  admin: ['¿Qué veo en el dashboard?', '¿Cómo creo vendedores?', '¿Cómo cambio estado de leads?'],
+};
+
+function welcomeMsg(title: string, hint: string) {
+  return `¡Hola! Soy **ANJE Guide**, tu asistente de ANJEYLEADERS.\n\n**${title}**\n${hint}\n\nEscríbeme o usa los accesos rápidos abajo.`;
+}
+
+function renderText(content: string) {
+  return content.split('\n').map((line, j, arr) => (
+    <span key={j}>
+      {line.split(/(\*\*[^*]+\*\*)/).map((part, k) =>
+        part.startsWith('**') ? <strong key={k}>{part.slice(2, -2)}</strong> : part,
+      )}
+      {j < arr.length - 1 && <br />}
+    </span>
+  ));
+}
 
 export default function AIAssistant() {
   const ctx = useOnboardingOptional();
@@ -14,10 +35,11 @@ export default function AIAssistant() {
   const role = detectRole(pathname);
   const [open, setOpen] = useState(false);
   const [aiEnabled, setAiEnabled] = useState(false);
+  const [aiLive, setAiLive] = useState<boolean | null>(null);
+  const [lastAi, setLastAi] = useState<boolean | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [stepIndex, setStepIndex] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const done = loadProgress(role) < 0;
 
@@ -25,20 +47,34 @@ export default function AIAssistant() {
   const setIsOpen = ctx?.setOpen ?? setOpen;
   const onboarding = ctx?.onboarding;
   const currentStep = onboarding?.current;
-  const activeStep = ctx?.stepIndex ?? stepIndex;
+  const activeStep = ctx?.stepIndex ?? 0;
+
+  const resetWelcome = useCallback(() => {
+    const title = currentStep?.title ?? '¿En qué te ayudo?';
+    const hint = currentStep?.hint ?? 'Productos, demos, prospectos y reportes semanales.';
+    setMessages([{ role: 'assistant', content: welcomeMsg(title, hint) }]);
+  }, [currentStep?.title, currentStep?.hint]);
 
   useEffect(() => {
-    api.assistant.status().then((s) => setAiEnabled(s.ai)).catch(() => {});
+    api.assistant.status().then((s) => {
+      setAiEnabled(Boolean(s.configured ?? s.ai));
+      setAiLive(Boolean(s.live ?? s.ai));
+    }).catch(() => {
+      setAiEnabled(false);
+      setAiLive(false);
+    });
   }, []);
 
   useEffect(() => {
-    if (isOpen && messages.length === 0 && currentStep && !done) {
-      setMessages([{
-        role: 'assistant',
-        content: `¡Hola! Soy **ANJE Guide** 🌸\n\nVoy a guiarte paso a paso. Empezamos:\n\n**${currentStep.title}**\n${currentStep.hint}\n\n¿Listo? Pulsa "Siguiente paso" o escríbeme cualquier duda.`,
-      }]);
+    setMessages([]);
+    setLastAi(null);
+  }, [role]);
+
+  useEffect(() => {
+    if (isOpen && messages.length === 0 && currentStep) {
+      resetWelcome();
     }
-  }, [isOpen, currentStep?.id]);
+  }, [isOpen, messages.length, currentStep, resetWelcome]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -49,19 +85,29 @@ export default function AIAssistant() {
     if (!msg || loading) return;
     setInput('');
     const userMsg: Msg = { role: 'user', content: msg };
-    setMessages((m) => [...m, userMsg]);
+    const nextHistory = [...messages, userMsg];
+    setMessages(nextHistory);
     setLoading(true);
     try {
       const res = await api.assistant.chat({
         role,
         message: msg,
         stepIndex: activeStep >= 0 ? activeStep : 0,
-        history: [...messages, userMsg],
+        history: nextHistory.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({
+          role: m.role,
+          content: m.content,
+        })),
         context: currentStep ? `Paso: ${currentStep.title}` : undefined,
       });
-      setMessages((m) => [...m, { role: 'assistant', content: res.reply }]);
+      setLastAi(res.ai);
+      setMessages((m) => [...m, { role: 'assistant', content: res.reply, ai: res.ai }]);
     } catch {
-      setMessages((m) => [...m, { role: 'assistant', content: 'Hubo un error. Intenta de nuevo o usa "Siguiente paso".' }]);
+      setLastAi(false);
+      setMessages((m) => [...m, {
+        role: 'assistant',
+        content: 'No pude conectar con la IA. Reintenta en un momento — el tour guiado sigue disponible.',
+        ai: false,
+      }]);
     } finally {
       setLoading(false);
     }
@@ -70,20 +116,13 @@ export default function AIAssistant() {
   function handleNext() {
     const next = onboarding?.next;
     if (ctx) ctx.runStepAction();
-    if (ctx) {
-      ctx.nextStep();
-    } else {
-      setStepIndex((s) => s + 1);
-    }
+    if (ctx) ctx.nextStep();
     if (next) {
-      setMessages((m) => [...m, {
-        role: 'assistant',
-        content: `**${next.title}**\n${next.hint}`,
-      }]);
+      setMessages((m) => [...m, { role: 'assistant', content: `**${next.title}**\n${next.hint}` }]);
     } else if (onboarding && activeStep + 1 >= onboarding.total) {
       setMessages((m) => [...m, {
         role: 'assistant',
-        content: '¡Excelente! Completaste el onboarding. Estoy aquí si necesitas ayuda.',
+        content: 'Completaste el tour. Sigue usando el chat para cualquier duda.',
       }]);
     }
   }
@@ -113,7 +152,6 @@ export default function AIAssistant() {
             className="fixed bottom-24 left-4 sm:left-6 z-50 w-[min(400px,calc(100vw-2rem))] flex flex-col rounded-2xl border border-neutral-200 bg-white shadow-2xl overflow-hidden"
             style={{ maxHeight: 'min(560px, calc(100vh - 7rem))' }}
           >
-            {/* Header */}
             <div className="flex items-center justify-between px-4 py-3 border-b bg-gradient-to-r from-anje-pink-light to-white">
               <div className="flex items-center gap-2">
                 <div className="w-9 h-9 rounded-xl bg-anje-pink flex items-center justify-center text-white">
@@ -122,17 +160,25 @@ export default function AIAssistant() {
                 <div>
                   <div className="font-serif text-sm font-semibold">ANJE Guide</div>
                   <div className="text-[10px] text-neutral-500 flex items-center gap-1">
-                    {aiEnabled ? <><Sparkles size={10} /> IA activa</> : 'Modo guía inteligente'}
+                    {lastAi === true && <><Sparkles size={10} className="text-anje-pink" /> Gemini</>}
+                    {lastAi === false && (aiLive === false && aiEnabled ? 'Guía offline (clave IA inválida)' : 'Guía offline')}
+                    {lastAi === null && aiLive && <><Sparkles size={10} /> IA lista</>}
+                    {lastAi === null && !aiLive && aiEnabled && 'Clave IA sin conexión'}
+                    {lastAi === null && !aiEnabled && 'Modo guía'}
                   </div>
                 </div>
               </div>
-              <button type="button" onClick={() => setIsOpen(false)} className="p-1.5 rounded-lg hover:bg-neutral-100" aria-label="Cerrar">
-                <X size={18} />
-              </button>
+              <div className="flex items-center gap-1">
+                <button type="button" onClick={resetWelcome} className="p-1.5 rounded-lg hover:bg-neutral-100" aria-label="Reiniciar chat" title="Reiniciar">
+                  <RotateCcw size={16} />
+                </button>
+                <button type="button" onClick={() => setIsOpen(false)} className="p-1.5 rounded-lg hover:bg-neutral-100" aria-label="Cerrar">
+                  <X size={18} />
+                </button>
+              </div>
             </div>
 
-            {/* Progress */}
-            {onboarding && activeStep >= 0 && (
+            {onboarding && activeStep >= 0 && !done && (
               <div className="px-4 py-2 bg-neutral-50 border-b">
                 <div className="flex justify-between text-[10px] text-neutral-500 mb-1">
                   <span>Paso {activeStep + 1} de {onboarding.total}</span>
@@ -142,7 +188,6 @@ export default function AIAssistant() {
                   <motion.div
                     className="h-full bg-anje-pink rounded-full"
                     animate={{ width: `${((activeStep + 1) / onboarding.total) * 100}%` }}
-                    transition={{ duration: 0.4 }}
                   />
                 </div>
                 {currentStep && (
@@ -151,67 +196,51 @@ export default function AIAssistant() {
               </div>
             )}
 
-            {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-[200px]">
+            <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-[200px] max-h-[320px]">
               {messages.map((m, i) => (
                 <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <div
-                    className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap ${
+                    className={`max-w-[88%] rounded-2xl px-3 py-2 text-sm leading-relaxed ${
                       m.role === 'user'
                         ? 'bg-anje-pink text-white rounded-br-md'
                         : 'bg-neutral-100 text-neutral-800 rounded-bl-md'
                     }`}
                   >
-                    {m.content.split('\n').map((line, j) => (
-                      <span key={j}>
-                        {line.split(/(\*\*[^*]+\*\*)/).map((part, k) =>
-                          part.startsWith('**') ? <strong key={k}>{part.slice(2, -2)}</strong> : part,
-                        )}
-                        {j < m.content.split('\n').length - 1 && <br />}
-                      </span>
-                    ))}
+                    {renderText(m.content)}
                   </div>
                 </div>
               ))}
               {loading && (
                 <div className="flex gap-1 px-3 py-2">
-                  <span className="w-2 h-2 bg-anje-pink rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                  <span className="w-2 h-2 bg-anje-pink rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                  <span className="w-2 h-2 bg-anje-pink rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                  {[0, 150, 300].map((d) => (
+                    <span key={d} className="w-2 h-2 bg-anje-pink rounded-full animate-bounce" style={{ animationDelay: `${d}ms` }} />
+                  ))}
                 </div>
               )}
               <div ref={bottomRef} />
             </div>
 
-            {/* Quick prompts */}
             <div className="px-3 pb-2 flex flex-wrap gap-1.5">
-              {['¿Qué productos tienen?', '¿Cómo registro ventas?', '¿Qué es una demo?'].map((q) => (
+              {QUICK[role].map((q) => (
                 <button
                   key={q}
                   type="button"
                   onClick={() => send(q)}
-                  className="text-[10px] px-2 py-1 rounded-full border border-anje-pink/30 text-anje-pink-dark hover:bg-anje-pink-light transition-colors"
+                  disabled={loading}
+                  className="text-[10px] px-2 py-1 rounded-full border border-anje-pink/30 text-anje-pink-dark hover:bg-anje-pink-light transition-colors disabled:opacity-50"
                 >
                   {q}
                 </button>
               ))}
             </div>
 
-            {/* Actions */}
             <div className="p-3 border-t bg-white space-y-2">
-              {onboarding && activeStep >= 0 && currentStep && (
-                <button
-                  type="button"
-                  onClick={handleNext}
-                  className="w-full btn btn-primary btn-sm py-2.5"
-                >
+              {onboarding && activeStep >= 0 && !done && currentStep && (
+                <button type="button" onClick={handleNext} className="w-full btn btn-primary btn-sm py-2.5">
                   Siguiente paso <ChevronRight size={16} />
                 </button>
               )}
-              <form
-                onSubmit={(e) => { e.preventDefault(); send(); }}
-                className="flex gap-2"
-              >
+              <form onSubmit={(e) => { e.preventDefault(); send(); }} className="flex gap-2">
                 <input
                   className="input flex-1 py-2 text-sm"
                   placeholder="Pregúntame lo que necesites..."

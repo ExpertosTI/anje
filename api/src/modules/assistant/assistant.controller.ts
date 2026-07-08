@@ -17,7 +17,7 @@ export class AssistantController {
 
   @Get('status')
   status() {
-    return { ai: this.svc.isAiEnabled(), name: 'ANJE Guide' };
+    return this.svc.status();
   }
 
   @Get('onboarding')

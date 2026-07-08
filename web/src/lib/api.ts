@@ -62,7 +62,7 @@ export const api = {
     upsert: (data: object) => req<Actividad>('/actividad', { method: 'POST', body: JSON.stringify(data) }),
   },
   assistant: {
-    status: () => req<{ ai: boolean; name: string }>('/assistant/status'),
+    status: () => req<{ ai: boolean; configured?: boolean; live?: boolean; name: string; error?: string }>('/assistant/status'),
     onboarding: (role: string, step?: number) =>
       req<import('./onboarding').OnboardingState>(`/assistant/onboarding?role=${role}${step != null ? `&step=${step}` : ''}`),
     chat: (data: {

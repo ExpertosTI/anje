@@ -1,23 +1,89 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { GoogleGenAI } from '@google/genai';
 import { ANJE_KNOWLEDGE, ONBOARDING_STEPS, OnboardingRole } from './knowledge';
 
 type ChatMessage = { role: 'user' | 'assistant'; content: string };
 
+const MODEL_FALLBACKS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-2.0-flash',
+];
+
 @Injectable()
 export class AssistantService {
+  private readonly log = new Logger(AssistantService.name);
+  private genai: GoogleGenAI | null = null;
+  private genaiKey = '';
+  private probeCache: { at: number; live: boolean; error?: string } | null = null;
+
   constructor(private cfg: ConfigService) {}
 
   isAiEnabled() {
-    return Boolean(this.cfg.get('GEMINI_API_KEY')?.trim());
+    return Boolean(this.apiKey());
+  }
+
+  async status() {
+    const configured = this.isAiEnabled();
+    if (!configured) {
+      return { ai: false, configured: false, live: false, name: 'ANJE Guide' };
+    }
+
+    const now = Date.now();
+    if (this.probeCache && now - this.probeCache.at < 60_000) {
+      return {
+        ai: this.probeCache.live,
+        configured: true,
+        live: this.probeCache.live,
+        name: 'ANJE Guide',
+        ...(this.probeCache.error ? { error: this.probeCache.error } : {}),
+      };
+    }
+
+    try {
+      await this.callGemini('Responde solo: ok', 'ok', []);
+      this.probeCache = { at: now, live: true };
+      return { ai: true, configured: true, live: true, name: 'ANJE Guide' };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.log.warn(`Gemini probe failed: ${msg}`);
+      this.probeCache = { at: now, live: false, error: msg.slice(0, 120) };
+      return {
+        ai: false,
+        configured: true,
+        live: false,
+        name: 'ANJE Guide',
+        error: msg.slice(0, 120),
+      };
+    }
   }
 
   private apiKey() {
     return this.cfg.get('GEMINI_API_KEY')?.trim() || '';
   }
 
-  private model() {
+  private preferredModel() {
     return this.cfg.get('GEMINI_MODEL', 'gemini-2.5-flash');
+  }
+
+  private models() {
+    const p = this.preferredModel();
+    return [p, ...MODEL_FALLBACKS.filter((m) => m !== p)];
+  }
+
+  private isAuthKey() {
+    return this.apiKey().startsWith('AQ.');
+  }
+
+  private getClient() {
+    const key = this.apiKey();
+    if (!key) throw new Error('gemini_not_configured');
+    if (!this.genai || this.genaiKey !== key) {
+      this.genai = new GoogleGenAI({ apiKey: key });
+      this.genaiKey = key;
+    }
+    return this.genai;
   }
 
   getOnboarding(role: OnboardingRole, stepIndex = 0) {
@@ -46,13 +112,14 @@ export class AssistantService {
       : '';
 
     const system = `${ANJE_KNOWLEDGE}\n\n## Contexto actual\nRol: ${body.role}\n${stepCtx}\n${body.context || ''}`;
+    const history = body.history || [];
 
     if (this.isAiEnabled()) {
       try {
-        const text = await this.callGemini(system, body.message, body.history || []);
+        const text = await this.callGemini(system, body.message, history);
         return { reply: text, ai: true, onboarding };
       } catch (err) {
-        console.warn('[assistant] gemini fallback:', err instanceof Error ? err.message : err);
+        this.log.warn(`Gemini fallback: ${err instanceof Error ? err.message : err}`);
       }
     }
 
@@ -72,7 +139,7 @@ export class AssistantService {
     const step = onboarding.current;
 
     if (/hola|empez|inicio|ayuda|guia|guía/.test(q)) {
-      return `¡Hola! Soy tu guía ANJE. Estás en el paso **${step.title}**: ${step.hint}\n\n¿Seguimos? Puedo explicarte productos, demos, métricas semanales o el panel admin.`;
+      return `¡Hola! Soy **ANJE Guide**. Estás en el paso **${step.title}**: ${step.hint}\n\n¿Seguimos? Puedo explicarte productos, demos, métricas semanales o el panel admin.`;
     }
     if (/producto|catálogo|catalogo|ollas|sarten/.test(q)) {
       return 'Tenemos 6 líneas: utensilios de cocina, juegos de ollas, sartenes, electrodomésticos, filtro de ducha y purificador de aire. ¿Quieres solicitar una demostración gratuita?';
@@ -92,28 +159,90 @@ export class AssistantService {
       return 'El administrador ve el dashboard global, gestiona vendedores (PIN por persona) y supervisa demos. Accede en /admin.';
     }
 
-    return `Entendido. Paso actual: **${step.title}** — ${step.hint}\n\nPregúntame sobre productos, demos, prospectos o reporte semanal.`;
+    return `Paso actual: **${step.title}** — ${step.hint}\n\nPregúntame sobre productos, demos, prospectos o reporte semanal.`;
+  }
+
+  private buildTurns(message: string, history: ChatMessage[]) {
+    const turns = history.slice(-10).map((m) => ({
+      role: m.role === 'assistant' ? ('model' as const) : ('user' as const),
+      text: m.content,
+    }));
+    const last = turns[turns.length - 1];
+    if (!last || last.text !== message || last.role !== 'user') {
+      turns.push({ role: 'user', text: message });
+    }
+    return turns;
   }
 
   private async callGemini(system: string, message: string, history: ChatMessage[]) {
-    const model = this.model();
-    const key = this.apiKey();
-    const contents = [
-      ...history.slice(-8).map((m) => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }],
-      })),
-      { role: 'user', parts: [{ text: message }] },
-    ];
+    const turns = this.buildTurns(message, history);
+    const strategies = this.isAuthKey()
+      ? [this.interactionChat.bind(this), this.sdkChat.bind(this), this.httpChat.bind(this)]
+      : [this.sdkChat.bind(this), this.httpChat.bind(this), this.interactionChat.bind(this)];
 
+    let lastErr = 'gemini_failed';
+    for (const model of this.models()) {
+      for (const strategy of strategies) {
+        try {
+          const text = await strategy(model, system, turns);
+          if (text) return text;
+        } catch (err) {
+          lastErr = err instanceof Error ? err.message : String(err);
+          this.log.debug(`${strategy.name} ${model}: ${lastErr}`);
+        }
+      }
+    }
+    throw new Error(lastErr);
+  }
+
+  private async interactionChat(model: string, system: string, turns: { role: 'user' | 'model'; text: string }[]) {
+    const input = turns
+      .map((t) => `${t.role === 'user' ? 'Usuario' : 'Asistente'}: ${t.text}`)
+      .join('\n');
+    const interaction = await this.getClient().interactions.create({
+      model,
+      input,
+      system_instruction: system,
+    });
+    const outputs = interaction.outputs as Array<{ text?: string }> | undefined;
+    const fromOutputs = outputs?.map((o) => o.text || '').join('').trim();
+    if (fromOutputs) return fromOutputs;
+    const legacy = (interaction as { output_text?: string }).output_text?.trim();
+    if (legacy) return legacy;
+    throw new Error('gemini_empty_interaction');
+  }
+
+  private async sdkChat(model: string, system: string, turns: { role: 'user' | 'model'; text: string }[]) {
+    const history = turns.slice(0, -1).map((t) => ({
+      role: t.role,
+      parts: [{ text: t.text }],
+    }));
+    const last = turns[turns.length - 1];
+    const response = await this.getClient().models.generateContent({
+      model,
+      contents: [...history, { role: 'user', parts: [{ text: last.text }] }],
+      config: {
+        systemInstruction: system,
+        temperature: 0.7,
+        maxOutputTokens: 512,
+      },
+    });
+    const text = response.text?.trim();
+    if (!text) throw new Error('gemini_empty_sdk');
+    return text;
+  }
+
+  private async httpChat(model: string, system: string, turns: { role: 'user' | 'model'; text: string }[]) {
+    const key = this.apiKey();
+    const contents = turns.map((t) => ({
+      role: t.role,
+      parts: [{ text: t.text }],
+    }));
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
       {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': key,
-        },
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: system }] },
           contents,
@@ -121,15 +250,13 @@ export class AssistantService {
         }),
       },
     );
-
     if (!res.ok) {
       const err = await res.text().catch(() => '');
-      throw new Error(`gemini_${res.status}:${err.slice(0, 120)}`);
+      throw new Error(`gemini_${res.status}:${err.slice(0, 150)}`);
     }
-
     const data = await res.json();
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) throw new Error('gemini_empty');
+    if (!text) throw new Error('gemini_empty_http');
     return text.trim();
   }
 }
