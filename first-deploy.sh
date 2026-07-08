@@ -23,7 +23,13 @@ fi
 cd "$PROJECT_DIR"
 git fetch origin main 2>/dev/null && git reset --hard origin/main 2>/dev/null || true
 
-chmod +x deploy.sh scripts/*.sh 2>/dev/null || true
+# Gemini (IA) — no va en git
+if [ ! -f "$PROJECT_DIR/api/.gemini.local" ] && [ -f /root/.anje-credentials.txt ]; then
+  key="$(grep '^GEMINI_API_KEY=' /root/.anje-credentials.txt | tail -1 | cut -d= -f2- || true)"
+  [ -n "$key" ] && printf '%s' "$key" > "$PROJECT_DIR/api/.gemini.local" && chmod 600 "$PROJECT_DIR/api/.gemini.local"
+fi
+
+chmod +x deploy.sh scripts/*.sh first-deploy.sh 2>/dev/null || true
 
 cyan "── Seed (env + DB) ────────────────────────────"
 ./scripts/seed.sh
